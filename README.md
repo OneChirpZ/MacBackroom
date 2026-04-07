@@ -2,77 +2,43 @@
 
 [简体中文](./README.zh-CN.md)
 
-MacBackroom is a macOS menu bar utility for efficiency-focused system controls. The current build focuses on fast Space switching with a private gesture path, and the longer-term goal is to grow into a broader toolkit for practical macOS tweaks and hidden settings.
+MacBackroom is a macOS menu bar app for fast Space switching and a small set of efficiency-focused system controls.
 
-## 一、Overview
+## 一、Current Features
 
-MacBackroom is built for local macOS workflows where speed matters more than platform portability. Right now the app ships as a menu bar extra with global shortcuts, live Space snapshots, and safeguards for repeated rapid switching.
+- Switch to the left or right Space from the menu bar popup
+- Trigger switching with global shortcuts: `⌃⌥⌘←` and `⌃⌥⌘→`
+- Block repeated overshoot input near the Space boundary
+- Show the current managed Space snapshot and refresh it manually
 
-## 二、Current Features
+## 二、Download Release
 
-### 1. Switching
-
-- Fast left and right Space switching from the menu bar popup
-- Global hotkeys: `⌃⌥⌘←` and `⌃⌥⌘→`
-- Edge-overshoot prevention for rapid repeated input
-
-### 2. Runtime Status
-
-- Accessibility permission detection and relaunch flow
-- Per-display managed Space snapshot display
-- Manual snapshot refresh from the popup window
-
-## 三、Technical Notes
-
-### 1. Platform
-
-- macOS only
-- SwiftUI menu bar app
-
-### 2. Implementation
-
-- Uses private `SkyLight` APIs and synthetic gesture events
-- Requires Accessibility permission to post the switching gesture
-- Intended for local experimentation and personal productivity workflows
-
-### 3. Distribution
-
-- Not suitable for App Store distribution in its current form
-- Future compatibility may change across macOS releases because private APIs are involved
-
-## 四、Build And Run
-
-### 1. Open In Xcode
-
-- Open [MacBackroom.xcodeproj](./MacBackroom.xcodeproj)
-- Select the `MacBackroom` scheme
-- Build and run on your Mac
-
-### 2. Build From Terminal
+- Download the latest packaged app from [Releases](https://github.com/OneChirpZ/MacBackroom/releases/latest)
+- The release build is not code signed
+- macOS may block the first launch; use Finder `Open` once, or remove the quarantine attribute manually:
 
 ```bash
+xattr -dr com.apple.quarantine /Applications/MacBackroom.app
+```
+
+- Grant Accessibility permission after launch so the app can send the switching gesture
+
+## 三、Build From Source
+
+```bash
+git clone https://github.com/OneChirpZ/MacBackroom.git
+cd MacBackroom
 xcodebuild -project MacBackroom.xcodeproj -scheme MacBackroom -derivedDataPath .DerivedData build
 ```
 
-### 3. Grant Permissions
+- You can also open [MacBackroom.xcodeproj](./MacBackroom.xcodeproj) in Xcode and run it directly
 
-- On first launch, grant Accessibility permission in System Settings
-- After permission is granted, the app relaunches and reinitializes the switching path
+## 四、Notes
 
-## 五、Project Layout
+- macOS only
+- Uses private `SkyLight` APIs and synthetic gesture events
+- Not suitable for App Store distribution
 
-- `MacBackroom/`: Swift source for the app
-- `MacBackroom/AppModel.swift`: permission flow, state, and top-level app actions
-- `MacBackroom/SkyLightBridge.swift`: low-level Space snapshot and gesture driver
-- `MacBackroom/ContentView.swift`: popup UI
-- `MacBackroom.xcodeproj/`: Xcode project
+## 五、License
 
-## 六、Roadmap
-
-- Expand beyond Space switching into more efficiency-oriented macOS controls
-- Add more user-facing toggles for practical hidden settings
-- Keep the UI lightweight enough for fast menu bar workflows
-
-## 七、License
-
-- Licensed under the [MIT License](./LICENSE)
+- [MIT License](./LICENSE)
