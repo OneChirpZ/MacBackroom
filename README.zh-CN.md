@@ -4,8 +4,6 @@
 
 MacBackroom 是一个面向效率场景的 macOS 菜单栏工具。当前版本重点解决快速切换 Space 的体验问题，后续会逐步扩展为一个更通用的 macOS 效率优化与隐藏设置工具箱。
 
-本仓库采用 PolyForm Noncommercial 1.0.0 许可证开放源码。未经单独授权，不允许商业用途。
-
 ## 一、项目概述
 
 MacBackroom 当前以本地个人使用为主要目标，优先考虑操作响应速度和系统级能力，而不是跨平台能力。现在的版本已经具备菜单栏入口、全局快捷键、Space 快照展示，以及连续快速切换时的边界保护。
@@ -77,5 +75,4 @@ xcodebuild -project MacBackroom.xcodeproj -scheme MacBackroom -derivedDataPath .
 
 ## 七、许可证
 
-- 许可证见 [LICENSE](./LICENSE)
-- 该许可证属于“非商用、源码可见”范围，不属于 OSI 定义下的开源许可证
+- 采用 [MIT License](./LICENSE)

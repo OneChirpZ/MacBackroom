@@ -4,8 +4,6 @@
 
 MacBackroom is a macOS menu bar utility for efficiency-focused system controls. The current build focuses on fast Space switching with a private gesture path, and the longer-term goal is to grow into a broader toolkit for practical macOS tweaks and hidden settings.
 
-This repository is source-available under the PolyForm Noncommercial 1.0.0 license. Commercial use is not permitted without separate permission.
-
 ## 一、Overview
 
 MacBackroom is built for local macOS workflows where speed matters more than platform portability. Right now the app ships as a menu bar extra with global shortcuts, live Space snapshots, and safeguards for repeated rapid switching.
@@ -77,5 +75,4 @@ xcodebuild -project MacBackroom.xcodeproj -scheme MacBackroom -derivedDataPath .
 
 ## 七、License
 
-- Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE)
-- This is a non-commercial, source-available license rather than an OSI-approved open-source license
+- Licensed under the [MIT License](./LICENSE)
