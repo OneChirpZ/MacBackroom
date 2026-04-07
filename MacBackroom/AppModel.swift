@@ -21,10 +21,15 @@ final class AppModel: ObservableObject {
     private var hotKeyCenter: HotKeyCenter?
     private var spaceSwitcher: SpaceSwitcher?
     private var permissionPollTimer: Timer?
+    private var workspaceObservers: Set<AnyCancellable> = []
     private var servicesConfigured = false
+    private var awaitingWakeRecoveryVerification = false
+    private var pendingWakeVerification: SpaceSwitchResult?
+    private var hasTriggeredWakeRecovery = false
 
     init() {
         preventEdgeOvershoot = Self.loadPreventEdgeOvershootPreference()
+        configureWorkspaceObservers()
         beginAccessibilityFlow()
     }
 
@@ -136,8 +141,10 @@ final class AppModel: ObservableObject {
         do {
             let result = try spaceSwitcher.switchSpace(direction, preventOvershoot: preventEdgeOvershoot)
             statusMessage = result.message
+            pendingWakeVerification = result.targetSpaceID == nil ? nil : result
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
                 self?.refreshSnapshot()
+                self?.verifyWakeRecoveryIfNeeded(expectedResult: result)
             }
         } catch let error as SpaceSwitcher.Error {
             statusMessage = error.errorDescription ?? "Space switch was blocked."
@@ -223,6 +230,93 @@ final class AppModel: ObservableObject {
         }
 
         return UserDefaults.standard.bool(forKey: preventEdgeOvershootDefaultsKey)
+    }
+
+    private func configureWorkspaceObservers() {
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+
+        workspaceCenter.publisher(for: NSWorkspace.willSleepNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.handleWillSleep()
+                }
+            }
+            .store(in: &workspaceObservers)
+
+        workspaceCenter.publisher(for: NSWorkspace.didWakeNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.handleDidWake()
+                }
+            }
+            .store(in: &workspaceObservers)
+    }
+
+    private func handleWillSleep() {
+        pendingWakeVerification = nil
+        awaitingWakeRecoveryVerification = false
+        hasTriggeredWakeRecovery = false
+        spaceSwitcher?.prepareForSleep()
+    }
+
+    private func handleDidWake() {
+        awaitingWakeRecoveryVerification = true
+        pendingWakeVerification = nil
+        hasTriggeredWakeRecovery = false
+
+        guard AccessibilityPermission.isTrusted(prompt: false) else {
+            accessibilityState = .waitingForGrant
+            statusMessage = "Accessibility needs to be rechecked after wake."
+            startPermissionPolling()
+            return
+        }
+
+        accessibilityState = .authorized
+        rebuildServicesAfterWake()
+    }
+
+    private func rebuildServicesAfterWake() {
+        spaceSwitcher?.prepareForSleep()
+        hotKeyCenter = nil
+        spaceSwitcher = nil
+        servicesConfigured = false
+        statusMessage = "Mac woke from sleep. Reinitializing hotkeys and gesture driver…"
+        configureServicesIfNeeded()
+    }
+
+    private func verifyWakeRecoveryIfNeeded(expectedResult: SpaceSwitchResult) {
+        guard pendingWakeVerification?.targetSpaceID == expectedResult.targetSpaceID,
+              pendingWakeVerification?.displayID == expectedResult.displayID else {
+            return
+        }
+
+        defer { pendingWakeVerification = nil }
+
+        guard awaitingWakeRecoveryVerification else {
+            return
+        }
+
+        guard let targetSpaceID = expectedResult.targetSpaceID else {
+            return
+        }
+
+        let currentSpaceID = try? spaceSwitcher?.currentSpaceID(on: expectedResult.displayID)
+        guard currentSpaceID != targetSpaceID else {
+            awaitingWakeRecoveryVerification = false
+            hasTriggeredWakeRecovery = false
+            return
+        }
+
+        guard !hasTriggeredWakeRecovery else {
+            statusMessage = "Swipe was posted after wake, but the current Space still did not change."
+            return
+        }
+
+        hasTriggeredWakeRecovery = true
+        statusMessage = "Space switching did not recover after wake. Relaunching MacBackroom to rebuild the gesture path…"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            AccessibilityPermission.relaunchCurrentApp()
+        }
     }
 }
 

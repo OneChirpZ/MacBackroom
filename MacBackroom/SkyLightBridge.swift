@@ -110,6 +110,8 @@ private struct OvershootGuardState {
 
 struct SpaceSwitchResult {
     let message: String
+    let displayID: String?
+    let targetSpaceID: SLSManagedSpaceID?
 }
 
 final class SpaceSwitcher {
@@ -193,7 +195,27 @@ final class SpaceSwitcher {
             transition = "index \(effectiveCurrentIndex) -> \(targetIndex)"
         }
 
-        return SpaceSwitchResult(message: "Posted HID swipe for \(displayLabel): \(transition).")
+        let targetSpaceID = resolution.rawSpaceIDs.indices.contains(targetIndex) ? resolution.rawSpaceIDs[targetIndex] : nil
+
+        return SpaceSwitchResult(
+            message: "Posted HID swipe for \(displayLabel): \(transition).",
+            displayID: resolution.displayID,
+            targetSpaceID: targetSpaceID
+        )
+    }
+
+    func currentSpaceID(on displayID: String?) throws -> SLSManagedSpaceID? {
+        let contexts = try skyLight.copyManagedDisplaySwitchContexts()
+        if let displayID {
+            return contexts.first(where: { $0.id == displayID })?.currentSpaceID
+        }
+
+        return contexts.first(where: { $0.id == "Main" })?.currentSpaceID ?? contexts.first?.currentSpaceID
+    }
+
+    func prepareForSleep() {
+        overshootGuardState = nil
+        skyLight.resetGestureDriver()
     }
 
     private func synchronizeOvershootGuard(with resolution: ManagedDisplaySwitchResolution) -> Int {
@@ -467,6 +489,10 @@ private final class SkyLightBridge {
         if !CVDisplayLinkIsRunning(displayLink) {
             CVDisplayLinkStart(displayLink)
         }
+    }
+
+    func resetGestureDriver() {
+        finishGesture()
     }
 
     private func mainConnectionID() -> SLSConnectionID {
