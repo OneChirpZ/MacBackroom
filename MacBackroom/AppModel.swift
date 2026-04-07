@@ -7,6 +7,8 @@ final class AppModel: ObservableObject {
     @Published var displays: [ManagedDisplaySnapshot] = []
     @Published var statusMessage = "Checking Accessibility permission…"
     @Published var accessibilityState: AccessibilityPermissionState = .checking
+    @Published var launchAtLoginEnabled = false
+    @Published var launchAtLoginStatusMessage = ""
     @Published var preventEdgeOvershoot: Bool {
         didSet {
             UserDefaults.standard.set(preventEdgeOvershoot, forKey: Self.preventEdgeOvershootDefaultsKey)
@@ -18,6 +20,7 @@ final class AppModel: ObservableObject {
 
     private static let preventEdgeOvershootDefaultsKey = "preventEdgeOvershoot"
 
+    private let launchAtLoginManager = LaunchAtLoginManager()
     private var hotKeyCenter: HotKeyCenter?
     private var spaceSwitcher: SpaceSwitcher?
     private var permissionPollTimer: Timer?
@@ -29,17 +32,20 @@ final class AppModel: ObservableObject {
 
     init() {
         preventEdgeOvershoot = Self.loadPreventEdgeOvershootPreference()
+        refreshLaunchAtLoginState()
         configureWorkspaceObservers()
         beginAccessibilityFlow()
     }
 
     private init(previewMode: Bool) {
         preventEdgeOvershoot = true
+        launchAtLoginStatusMessage = "Preview data"
         if previewMode {
             accessibilityState = .authorized
             statusMessage = "Preview data"
             servicesConfigured = true
         } else {
+            refreshLaunchAtLoginState()
             beginAccessibilityFlow()
         }
     }
@@ -92,8 +98,32 @@ final class AppModel: ObservableObject {
         AccessibilityPermission.openSystemSettings()
     }
 
+    func refreshLaunchAtLoginState() {
+        applyLaunchAtLoginState(launchAtLoginManager.currentState())
+    }
+
+    func setLaunchAtLoginEnabled(_ isEnabled: Bool) {
+        guard !isEnabled || LaunchAtLoginManager.isInstalledInApplicationsFolder else {
+            applyLaunchAtLoginState(launchAtLoginManager.currentState())
+            statusMessage = "Install MacBackroom in Applications before enabling launch at login."
+            return
+        }
+
+        do {
+            applyLaunchAtLoginState(try launchAtLoginManager.setEnabled(isEnabled))
+            statusMessage = isEnabled ? "Launch at login enabled." : "Launch at login disabled."
+        } catch {
+            applyLaunchAtLoginState(launchAtLoginManager.currentState())
+            statusMessage = "Launch at login update failed: \(error.localizedDescription)"
+        }
+    }
+
     var canSwitchSpaces: Bool {
         accessibilityState == .authorized && spaceSwitcher != nil
+    }
+
+    var canChangeLaunchAtLogin: Bool {
+        LaunchAtLoginManager.isInstalledInApplicationsFolder || launchAtLoginEnabled
     }
 
     var shouldShowAccessibilityBanner: Bool {
@@ -230,6 +260,11 @@ final class AppModel: ObservableObject {
         }
 
         return UserDefaults.standard.bool(forKey: preventEdgeOvershootDefaultsKey)
+    }
+
+    private func applyLaunchAtLoginState(_ state: LaunchAtLoginState) {
+        launchAtLoginEnabled = state.isEnabled
+        launchAtLoginStatusMessage = state.detailMessage
     }
 
     private func configureWorkspaceObservers() {

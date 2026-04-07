@@ -54,6 +54,22 @@ struct ContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle(
+                    "Launch at login",
+                    isOn: Binding(
+                        get: { appModel.launchAtLoginEnabled },
+                        set: { appModel.setLaunchAtLoginEnabled($0) }
+                    )
+                )
+                .font(.caption)
+                .disabled(!appModel.canChangeLaunchAtLogin)
+                Text(appModel.launchAtLoginStatusMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             HStack(spacing: 10) {
                 Button("Switch Left") {
                     appModel.switchLeft()
@@ -100,6 +116,9 @@ struct ContentView: View {
         }
         .padding()
         .frame(width: 360)
+        .onAppear {
+            appModel.refreshLaunchAtLoginState()
+        }
     }
 }
 
