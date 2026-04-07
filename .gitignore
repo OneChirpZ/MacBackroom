@@ -1,3 +1,4 @@
 .DS_Store
 .DerivedData/
-MacBackroom.xcodeproj/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
