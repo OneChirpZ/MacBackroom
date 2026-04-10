@@ -76,15 +76,15 @@ final class HotKeyCenter {
         )
 
         static let pasteTicketDate = Shortcut(
-            keyCode: UInt32(kVK_ANSI_LeftBracket),
-            modifiers: [.command, .control, .option],
-            keyDisplay: "["
-        )
-
-        static let pasteCompactDate = Shortcut(
             keyCode: UInt32(kVK_ANSI_RightBracket),
             modifiers: [.command, .control, .option],
             keyDisplay: "]"
+        )
+
+        static let pasteCompactDate = Shortcut(
+            keyCode: UInt32(kVK_ANSI_LeftBracket),
+            modifiers: [.command, .control, .option],
+            keyDisplay: "["
         )
 
         private static let modifierOnlyKeyCodes: Set<UInt32> = [
