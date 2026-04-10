@@ -1,6 +1,88 @@
 import AppKit
+import Carbon.HIToolbox
 import Combine
 import SwiftUI
+
+enum AppShortcutAction: String, CaseIterable, Hashable, Identifiable {
+    case switchLeft
+    case switchRight
+    case pasteTicketDate
+    case pasteCompactDate
+
+    var id: String {
+        rawValue
+    }
+
+    var title: String {
+        switch self {
+        case .switchLeft:
+            return "Switch Left"
+        case .switchRight:
+            return "Switch Right"
+        case .pasteTicketDate:
+            return "Paste 0410-🚧-"
+        case .pasteCompactDate:
+            return "Paste 260410"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .switchLeft:
+            return "arrow.left.circle"
+        case .switchRight:
+            return "arrow.right.circle"
+        case .pasteTicketDate:
+            return "text.insert"
+        case .pasteCompactDate:
+            return "calendar"
+        }
+    }
+
+    var detailText: String {
+        switch self {
+        case .switchLeft:
+            return "Trigger a one-step switch to the previous Space."
+        case .switchRight:
+            return "Trigger a one-step switch to the next Space."
+        case .pasteTicketDate:
+            return "Pastes today's date as `MMdd-🚧-`."
+        case .pasteCompactDate:
+            return "Pastes today's date as `yyMMdd`."
+        }
+    }
+
+    var defaultShortcut: HotKeyCenter.Shortcut {
+        switch self {
+        case .switchLeft:
+            return .switchLeft
+        case .switchRight:
+            return .switchRight
+        case .pasteTicketDate:
+            return .pasteTicketDate
+        case .pasteCompactDate:
+            return .pasteCompactDate
+        }
+    }
+
+    var defaultsKey: String {
+        "shortcut.\(rawValue)"
+    }
+}
+
+private enum PasteError: LocalizedError {
+    case writeToPasteboardFailed
+    case eventCreationFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .writeToPasteboardFailed:
+            return "Unable to write the generated text to the pasteboard."
+        case .eventCreationFailed:
+            return "Unable to synthesize the paste keyboard event."
+        }
+    }
+}
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -14,9 +96,7 @@ final class AppModel: ObservableObject {
             UserDefaults.standard.set(preventEdgeOvershoot, forKey: Self.preventEdgeOvershootDefaultsKey)
         }
     }
-
-    let leftShortcutDescription = HotKeyCenter.Shortcut.switchLeft.displayString
-    let rightShortcutDescription = HotKeyCenter.Shortcut.switchRight.displayString
+    @Published private var shortcutBindings: [AppShortcutAction: HotKeyCenter.Shortcut]
 
     private static let preventEdgeOvershootDefaultsKey = "preventEdgeOvershoot"
 
@@ -29,9 +109,13 @@ final class AppModel: ObservableObject {
     private var awaitingWakeRecoveryVerification = false
     private var pendingWakeVerification: SpaceSwitchResult?
     private var hasTriggeredWakeRecovery = false
+    private var preservedPasteboardItems: [NSPasteboardItem]?
+    private var pendingPasteRestoreToken: UUID?
+    private var injectedPasteboardChangeCount: Int?
 
     init() {
         preventEdgeOvershoot = Self.loadPreventEdgeOvershootPreference()
+        shortcutBindings = Self.loadShortcutBindings()
         refreshLaunchAtLoginState()
         configureWorkspaceObservers()
         beginAccessibilityFlow()
@@ -39,6 +123,7 @@ final class AppModel: ObservableObject {
 
     private init(previewMode: Bool) {
         preventEdgeOvershoot = true
+        shortcutBindings = Dictionary(uniqueKeysWithValues: AppShortcutAction.allCases.map { ($0, $0.defaultShortcut) })
         launchAtLoginStatusMessage = "Preview data"
         if previewMode {
             accessibilityState = .authorized
@@ -60,6 +145,74 @@ final class AppModel: ObservableObject {
 
     func switchRight() {
         switchSpaces(.right)
+    }
+
+    func shortcut(for action: AppShortcutAction) -> HotKeyCenter.Shortcut {
+        shortcutBindings[action] ?? action.defaultShortcut
+    }
+
+    func shortcutPreview(for action: AppShortcutAction) -> String {
+        switch action {
+        case .pasteTicketDate:
+            return Self.ticketDateString(from: Date())
+        case .pasteCompactDate:
+            return Self.compactDateString(from: Date())
+        case .switchLeft, .switchRight:
+            return action.detailText
+        }
+    }
+
+    func beginShortcutRecording(for action: AppShortcutAction) {
+        suspendHotKeys()
+        statusMessage = "Recording \(action.title). Press a key combination, or Esc to cancel."
+    }
+
+    func cancelShortcutRecording() {
+        resumeHotKeys()
+        statusMessage = "Shortcut recording cancelled."
+    }
+
+    @discardableResult
+    func updateShortcut(_ proposedShortcut: HotKeyCenter.Shortcut, for action: AppShortcutAction) -> Bool {
+        let newShortcut = HotKeyCenter.Shortcut(
+            keyCode: proposedShortcut.keyCode,
+            modifiers: proposedShortcut.modifiers,
+            keyDisplay: proposedShortcut.keyDisplay
+        )
+
+        guard !newShortcut.modifiers.isEmpty else {
+            statusMessage = "Shortcut must include at least one modifier key."
+            return false
+        }
+
+        if let conflict = AppShortcutAction.allCases.first(where: {
+            $0 != action && shortcut(for: $0).hasSameTrigger(as: newShortcut)
+        }) {
+            statusMessage = "\(newShortcut.displayString) is already used by \(conflict.title)."
+            return false
+        }
+
+        let previousBindings = shortcutBindings
+        var candidateBindings = shortcutBindings
+        candidateBindings[action] = newShortcut
+
+        do {
+            try applyHotKeys(candidateBindings)
+        } catch {
+            try? applyHotKeys(previousBindings)
+            statusMessage = "Shortcut update failed: \(error.localizedDescription)"
+            return false
+        }
+
+        shortcutBindings = candidateBindings
+        persistShortcut(newShortcut, for: action)
+        statusMessage = "Shortcut updated: \(action.title) → \(newShortcut.displayString)"
+        return true
+    }
+
+    @discardableResult
+    func resetShortcut(for action: AppShortcutAction) -> Bool {
+        updateShortcut(action.defaultShortcut, for: action)
     }
 
     func refreshSnapshot() {
@@ -234,15 +387,9 @@ final class AppModel: ObservableObject {
             let switcher = SpaceSwitcher()
             let hotKeys = try HotKeyCenter()
 
-            try hotKeys.register(shortcut: .switchLeft) { [weak self] in
-                self?.switchLeft()
-            }
-            try hotKeys.register(shortcut: .switchRight) { [weak self] in
-                self?.switchRight()
-            }
-
             spaceSwitcher = switcher
             hotKeyCenter = hotKeys
+            try applyHotKeys(shortcutBindings)
             servicesConfigured = true
             statusMessage = "Hotkeys ready."
             refreshSnapshot()
@@ -252,6 +399,199 @@ final class AppModel: ObservableObject {
             servicesConfigured = false
             statusMessage = "Startup failed: \(error.localizedDescription)"
         }
+    }
+
+    private func applyHotKeys(_ bindings: [AppShortcutAction: HotKeyCenter.Shortcut]) throws {
+        guard let hotKeyCenter else {
+            return
+        }
+
+        let registrations = AppShortcutAction.allCases.map { action in
+            HotKeyCenter.Registration(shortcut: bindings[action] ?? action.defaultShortcut) { [weak self] in
+                self?.handleShortcutAction(action)
+            }
+        }
+
+        try hotKeyCenter.replaceAll(with: registrations)
+    }
+
+    private func suspendHotKeys() {
+        hotKeyCenter?.unregisterAll()
+    }
+
+    private func resumeHotKeys() {
+        do {
+            try applyHotKeys(shortcutBindings)
+        } catch {
+            statusMessage = "Failed to restore hotkeys: \(error.localizedDescription)"
+        }
+    }
+
+    private func handleShortcutAction(_ action: AppShortcutAction) {
+        switch action {
+        case .switchLeft:
+            switchLeft()
+        case .switchRight:
+            switchRight()
+        case .pasteTicketDate:
+            pasteDateString(Self.ticketDateString(from: Date()))
+        case .pasteCompactDate:
+            pasteDateString(Self.compactDateString(from: Date()))
+        }
+    }
+
+    private func pasteDateString(_ value: String) {
+        do {
+            try pasteTextAtCurrentCursor(value)
+            statusMessage = "Pasted \(value)"
+        } catch {
+            statusMessage = "Paste failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func pasteTextAtCurrentCursor(_ value: String) throws {
+        let pasteboard = NSPasteboard.general
+        preservePasteboardIfNeeded(pasteboard)
+
+        pasteboard.clearContents()
+        guard pasteboard.setString(value, forType: .string) else {
+            clearPendingPasteboardRestore()
+            throw PasteError.writeToPasteboardFailed
+        }
+
+        let restoreToken = UUID()
+        pendingPasteRestoreToken = restoreToken
+        injectedPasteboardChangeCount = pasteboard.changeCount
+
+        do {
+            try postPasteCommand()
+        } catch {
+            restorePasteboardSnapshotIfPossible()
+            throw error
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.restorePasteboardIfNeeded(token: restoreToken)
+            }
+        }
+    }
+
+    private func preservePasteboardIfNeeded(_ pasteboard: NSPasteboard) {
+        if preservedPasteboardItems != nil, pasteboard.changeCount != injectedPasteboardChangeCount {
+            clearPendingPasteboardRestore()
+        }
+
+        guard preservedPasteboardItems == nil else {
+            return
+        }
+
+        preservedPasteboardItems = pasteboard.pasteboardItems?.compactMap { $0.copy() as? NSPasteboardItem } ?? []
+    }
+
+    private func restorePasteboardIfNeeded(token: UUID) {
+        guard pendingPasteRestoreToken == token else {
+            return
+        }
+
+        let pasteboard = NSPasteboard.general
+        guard pasteboard.changeCount == injectedPasteboardChangeCount else {
+            clearPendingPasteboardRestore()
+            return
+        }
+
+        restorePasteboardSnapshotIfPossible()
+    }
+
+    private func restorePasteboardSnapshotIfPossible() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+
+        if let preservedPasteboardItems, !preservedPasteboardItems.isEmpty {
+            _ = pasteboard.writeObjects(preservedPasteboardItems)
+        }
+
+        clearPendingPasteboardRestore()
+    }
+
+    private func clearPendingPasteboardRestore() {
+        preservedPasteboardItems = nil
+        pendingPasteRestoreToken = nil
+        injectedPasteboardChangeCount = nil
+    }
+
+    private func postPasteCommand() throws {
+        guard let source = CGEventSource(stateID: .hidSystemState) else {
+            throw PasteError.eventCreationFailed
+        }
+
+        guard
+            let keyDownEvent = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: CGKeyCode(kVK_ANSI_V),
+                keyDown: true
+            ),
+            let keyUpEvent = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: CGKeyCode(kVK_ANSI_V),
+                keyDown: false
+            )
+        else {
+            throw PasteError.eventCreationFailed
+        }
+
+        keyDownEvent.flags = .maskCommand
+        keyUpEvent.flags = .maskCommand
+        keyDownEvent.post(tap: .cghidEventTap)
+        keyUpEvent.post(tap: .cghidEventTap)
+    }
+
+    private func persistShortcut(_ shortcut: HotKeyCenter.Shortcut, for action: AppShortcutAction) {
+        let defaults = UserDefaults.standard
+
+        if shortcut.hasSameTrigger(as: action.defaultShortcut), shortcut.keyDisplay == action.defaultShortcut.keyDisplay {
+            defaults.removeObject(forKey: action.defaultsKey)
+            return
+        }
+
+        guard let data = try? JSONEncoder().encode(shortcut) else {
+            return
+        }
+
+        defaults.set(data, forKey: action.defaultsKey)
+    }
+
+    private static func loadShortcutBindings() -> [AppShortcutAction: HotKeyCenter.Shortcut] {
+        Dictionary(uniqueKeysWithValues: AppShortcutAction.allCases.map { action in
+            (action, loadShortcut(for: action))
+        })
+    }
+
+    private static func loadShortcut(for action: AppShortcutAction) -> HotKeyCenter.Shortcut {
+        guard
+            let data = UserDefaults.standard.data(forKey: action.defaultsKey),
+            let shortcut = try? JSONDecoder().decode(HotKeyCenter.Shortcut.self, from: data)
+        else {
+            return action.defaultShortcut
+        }
+
+        return shortcut
+    }
+
+    private static func ticketDateString(from date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "MMdd"
+        return "\(formatter.string(from: date))-🚧-"
+    }
+
+    private static func compactDateString(from date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyMMdd"
+        return formatter.string(from: date)
     }
 
     private static func loadPreventEdgeOvershootPreference() -> Bool {
