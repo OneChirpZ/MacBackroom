@@ -109,7 +109,9 @@ final class AppModel: ObservableObject {
     private var awaitingWakeRecoveryVerification = false
     private var pendingWakeVerification: SpaceSwitchResult?
     private var hasTriggeredWakeRecovery = false
-    private var preservedPasteboardItems: [NSPasteboardItem]?
+    private var pendingPasteActionToken: UUID?
+    private var preservedPasteboardString: String?
+    private var shouldRestorePasteboardString = false
     private var pendingPasteRestoreToken: UUID?
     private var injectedPasteboardChangeCount: Int?
 
@@ -407,8 +409,10 @@ final class AppModel: ObservableObject {
         }
 
         let registrations = AppShortcutAction.allCases.map { action in
-            HotKeyCenter.Registration(shortcut: bindings[action] ?? action.defaultShortcut) { [weak self] in
-                self?.handleShortcutAction(action)
+            return HotKeyCenter.Registration(shortcut: bindings[action] ?? action.defaultShortcut) { [weak self] in
+                Task { @MainActor [weak self] in
+                    self?.handleShortcutAction(action)
+                }
             }
         }
 
@@ -441,17 +445,14 @@ final class AppModel: ObservableObject {
     }
 
     private func pasteDateString(_ value: String) {
-        do {
-            try pasteTextAtCurrentCursor(value)
-            statusMessage = "Pasted \(value)"
-        } catch {
-            statusMessage = "Paste failed: \(error.localizedDescription)"
-        }
+        let token = UUID()
+        pendingPasteActionToken = token
+        waitForModifierReleaseAndPaste(value, token: token, remainingAttempts: 40)
     }
 
     private func pasteTextAtCurrentCursor(_ value: String) throws {
         let pasteboard = NSPasteboard.general
-        preservePasteboardIfNeeded(pasteboard)
+        preservePasteboardStringIfNeeded(pasteboard)
 
         pasteboard.clearContents()
         guard pasteboard.setString(value, forType: .string) else {
@@ -477,16 +478,17 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func preservePasteboardIfNeeded(_ pasteboard: NSPasteboard) {
-        if preservedPasteboardItems != nil, pasteboard.changeCount != injectedPasteboardChangeCount {
+    private func preservePasteboardStringIfNeeded(_ pasteboard: NSPasteboard) {
+        if pendingPasteRestoreToken != nil, pasteboard.changeCount != injectedPasteboardChangeCount {
             clearPendingPasteboardRestore()
         }
 
-        guard preservedPasteboardItems == nil else {
+        guard pendingPasteRestoreToken == nil else {
             return
         }
 
-        preservedPasteboardItems = pasteboard.pasteboardItems?.compactMap { $0.copy() as? NSPasteboardItem } ?? []
+        shouldRestorePasteboardString = pasteboard.types?.contains(.string) == true
+        preservedPasteboardString = shouldRestorePasteboardString ? pasteboard.string(forType: .string) : nil
     }
 
     private func restorePasteboardIfNeeded(token: UUID) {
@@ -504,18 +506,24 @@ final class AppModel: ObservableObject {
     }
 
     private func restorePasteboardSnapshotIfPossible() {
+        guard shouldRestorePasteboardString else {
+            clearPendingPasteboardRestore()
+            return
+        }
+
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
 
-        if let preservedPasteboardItems, !preservedPasteboardItems.isEmpty {
-            _ = pasteboard.writeObjects(preservedPasteboardItems)
+        if let preservedPasteboardString {
+            _ = pasteboard.setString(preservedPasteboardString, forType: .string)
         }
 
         clearPendingPasteboardRestore()
     }
 
     private func clearPendingPasteboardRestore() {
-        preservedPasteboardItems = nil
+        preservedPasteboardString = nil
+        shouldRestorePasteboardString = false
         pendingPasteRestoreToken = nil
         injectedPasteboardChangeCount = nil
     }
@@ -526,6 +534,11 @@ final class AppModel: ObservableObject {
         }
 
         guard
+            let commandDownEvent = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: CGKeyCode(kVK_Command),
+                keyDown: true
+            ),
             let keyDownEvent = CGEvent(
                 keyboardEventSource: source,
                 virtualKey: CGKeyCode(kVK_ANSI_V),
@@ -535,15 +548,66 @@ final class AppModel: ObservableObject {
                 keyboardEventSource: source,
                 virtualKey: CGKeyCode(kVK_ANSI_V),
                 keyDown: false
+            ),
+            let commandUpEvent = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: CGKeyCode(kVK_Command),
+                keyDown: false
             )
         else {
             throw PasteError.eventCreationFailed
         }
 
+        commandDownEvent.post(tap: .cghidEventTap)
+        usleep(20_000)
         keyDownEvent.flags = .maskCommand
         keyUpEvent.flags = .maskCommand
         keyDownEvent.post(tap: .cghidEventTap)
         keyUpEvent.post(tap: .cghidEventTap)
+        usleep(20_000)
+        commandUpEvent.post(tap: .cghidEventTap)
+    }
+
+    private func waitForModifierReleaseAndPaste(_ value: String, token: UUID, remainingAttempts: Int) {
+        guard pendingPasteActionToken == token else {
+            return
+        }
+
+        if recordableModifiersAreReleased() || remainingAttempts <= 0 {
+            pendingPasteActionToken = nil
+
+            do {
+                try pasteTextAtCurrentCursor(value)
+                statusMessage = "Pasted \(value)"
+            } catch {
+                statusMessage = "Paste failed: \(error.localizedDescription)"
+            }
+
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.waitForModifierReleaseAndPaste(value, token: token, remainingAttempts: remainingAttempts - 1)
+            }
+        }
+    }
+
+    private func recordableModifiersAreReleased() -> Bool {
+        let modifierKeyCodes: [CGKeyCode] = [
+            CGKeyCode(kVK_Command),
+            CGKeyCode(kVK_RightCommand),
+            CGKeyCode(kVK_Control),
+            CGKeyCode(kVK_RightControl),
+            CGKeyCode(kVK_Option),
+            CGKeyCode(kVK_RightOption),
+            CGKeyCode(kVK_Shift),
+            CGKeyCode(kVK_RightShift)
+        ]
+
+        return modifierKeyCodes.allSatisfy { keyCode in
+            !CGEventSource.keyState(.combinedSessionState, key: keyCode)
+        }
     }
 
     private func persistShortcut(_ shortcut: HotKeyCenter.Shortcut, for action: AppShortcutAction) {
