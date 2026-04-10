@@ -29,58 +29,11 @@ PROJECT="$ROOT_DIR/MacBackroom.xcodeproj"
 CONFIGURATION="Release"
 DESTINATION="generic/platform=macOS"
 FORCE_UNSIGNED_BUILD="${FORCE_UNSIGNED_BUILD:-0}"
-REQUIRE_SIGNING="${REQUIRE_SIGNING:-0}"
-
-has_matching_signing_identity() {
-  local identity_type="$1"
-  local team_id="$2"
-  local identities
-
-  identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
-  [[ -n "$identities" ]] || return 1
-
-  if [[ -n "$team_id" ]]; then
-    printf '%s\n' "$identities" | grep -Eq "\"${identity_type}: .*\\(${team_id}\\)\""
-  else
-    printf '%s\n' "$identities" | grep -Eq "\"${identity_type}: "
-  fi
-}
-
-resolve_build_mode() {
-  local build_settings code_sign_identity development_team
-
-  if [[ "$FORCE_UNSIGNED_BUILD" == "1" ]]; then
-    echo "unsigned"
-    return
-  fi
-
-  build_settings="$(xcodebuild -project "$PROJECT" -scheme "$SCHEME" -configuration "$CONFIGURATION" -showBuildSettings 2>/dev/null)"
-  code_sign_identity="$(printf '%s\n' "$build_settings" | awk -F' = ' '/CODE_SIGN_IDENTITY = / {print $2; exit}')"
-  development_team="$(printf '%s\n' "$build_settings" | awk -F' = ' '/DEVELOPMENT_TEAM = / {print $2; exit}')"
-
-  if [[ -z "$code_sign_identity" || "$code_sign_identity" == "-" ]]; then
-    echo "unsigned"
-    return
-  fi
-
-  if has_matching_signing_identity "$code_sign_identity" "$development_team"; then
-    echo "signed"
-    return
-  fi
-
-  if [[ "$REQUIRE_SIGNING" == "1" ]]; then
-    echo "Missing signing identity '${code_sign_identity}' for team '${development_team}'." >&2
-    exit 1
-  fi
-
-  echo "unsigned"
-}
 
 mkdir -p "$DIST_DIR"
 rm -rf "$TMP_DIR"
 mkdir -p "$TMP_DIR/dmg"
 
-BUILD_MODE="$(resolve_build_mode)"
 BUILD_ARGS=(
   -project "$PROJECT" \
   -scheme "$SCHEME" \
@@ -90,17 +43,19 @@ BUILD_ARGS=(
   ONLY_ACTIVE_ARCH=NO
 )
 
-if [[ "$BUILD_MODE" == "unsigned" ]]; then
-  BUILD_ARGS+=(CODE_SIGNING_ALLOWED=NO)
+if [[ "$FORCE_UNSIGNED_BUILD" == "1" ]]; then
+  BUILD_MODE="unsigned"
   echo "Building $SCHEME ($CONFIGURATION, unsigned)..."
-  echo "Developer ID certificate not available. Falling back to unsigned build."
+  xcodebuild "${BUILD_ARGS[@]}" CODE_SIGNING_ALLOWED=NO build
 else
-  echo "Building $SCHEME ($CONFIGURATION, signed)..."
+  BUILD_MODE="signed"
+  echo "Building $SCHEME ($CONFIGURATION, local-signed if available)..."
+  if ! xcodebuild "${BUILD_ARGS[@]}" build; then
+    BUILD_MODE="unsigned"
+    echo "Signed build failed. Falling back to unsigned build."
+    xcodebuild "${BUILD_ARGS[@]}" CODE_SIGNING_ALLOWED=NO build
+  fi
 fi
-
-xcodebuild \
-  "${BUILD_ARGS[@]}" \
-  build
 
 APP_PATH="$DERIVED_DATA_PATH/Build/Products/$CONFIGURATION/$SCHEME.app"
 if [[ ! -d "$APP_PATH" ]]; then
