@@ -213,6 +213,10 @@ final class SpaceSwitcher {
         return contexts.first(where: { $0.id == "Main" })?.currentSpaceID ?? contexts.first?.currentSpaceID
     }
 
+    func invalidatePredictedSpaceState() {
+        overshootGuardState = nil
+    }
+
     func prepareForSleep() {
         overshootGuardState = nil
         skyLight.resetGestureDriver()

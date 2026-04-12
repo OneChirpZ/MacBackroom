@@ -218,6 +218,10 @@ final class AppModel: ObservableObject {
     }
 
     func refreshSnapshot() {
+        refreshSnapshot(announceStatus: true)
+    }
+
+    private func refreshSnapshot(announceStatus: Bool) {
         guard let spaceSwitcher else {
             displays = []
             return
@@ -225,6 +229,10 @@ final class AppModel: ObservableObject {
 
         do {
             displays = try spaceSwitcher.snapshotDisplays()
+            if !announceStatus {
+                return
+            }
+
             if displays.isEmpty {
                 statusMessage = "No managed displays returned by SkyLight."
             } else {
@@ -232,7 +240,9 @@ final class AppModel: ObservableObject {
             }
         } catch {
             displays = []
-            statusMessage = "Snapshot failed: \(error.localizedDescription)"
+            if announceStatus {
+                statusMessage = "Snapshot failed: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -689,6 +699,14 @@ final class AppModel: ObservableObject {
                 }
             }
             .store(in: &workspaceObservers)
+
+        workspaceCenter.publisher(for: NSWorkspace.activeSpaceDidChangeNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.handleActiveSpaceDidChange()
+                }
+            }
+            .store(in: &workspaceObservers)
     }
 
     private func handleWillSleep() {
@@ -712,6 +730,16 @@ final class AppModel: ObservableObject {
 
         accessibilityState = .authorized
         rebuildServicesAfterWake()
+    }
+
+    private func handleActiveSpaceDidChange() {
+        guard let spaceSwitcher else {
+            return
+        }
+
+        // System-driven Space jumps invalidate our local edge prediction immediately.
+        spaceSwitcher.invalidatePredictedSpaceState()
+        refreshSnapshot(announceStatus: false)
     }
 
     private func rebuildServicesAfterWake() {
