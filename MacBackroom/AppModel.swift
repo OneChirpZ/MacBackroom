@@ -2,6 +2,124 @@ import AppKit
 import Combine
 import SwiftUI
 
+private struct DockPreferences {
+    var spaceSwitchAnimationDisabled: Bool
+    var autohideDelay: Double
+    var autohideTimeModifier: Double
+}
+
+private enum DockPreferencesError: LocalizedError {
+    case writeFailed(String)
+    case commandFailed(command: String, detail: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .writeFailed(let key):
+            return "Unable to save Dock preference `\(key)`."
+        case .commandFailed(let command, let detail):
+            if detail.isEmpty {
+                return "`\(command)` failed."
+            }
+
+            return "`\(command)` failed: \(detail)"
+        }
+    }
+}
+
+private enum DockPreferencesStore {
+    private static let domain = "com.apple.dock" as CFString
+    private static let spaceSwitchAnimationDisabledKey = "workspaces-swoosh-animation-off"
+    private static let autohideDelayKey = "autohide-delay"
+    private static let autohideTimeModifierKey = "autohide-time-modifier"
+
+    static func load() -> DockPreferences {
+        DockPreferences(
+            spaceSwitchAnimationDisabled: boolValue(forKey: spaceSwitchAnimationDisabledKey, defaultValue: false),
+            autohideDelay: doubleValue(forKey: autohideDelayKey, defaultValue: 0),
+            autohideTimeModifier: doubleValue(forKey: autohideTimeModifierKey, defaultValue: 0.4)
+        )
+    }
+
+    static func save(_ preferences: DockPreferences) throws {
+        try set(preferences.spaceSwitchAnimationDisabled, forKey: spaceSwitchAnimationDisabledKey)
+        try set(preferences.autohideDelay, forKey: autohideDelayKey)
+        try set(preferences.autohideTimeModifier, forKey: autohideTimeModifierKey)
+    }
+
+    static func restartDock() throws {
+        try runCommand(executablePath: "/usr/bin/killall", arguments: ["Dock"])
+    }
+
+    private static func boolValue(forKey key: String, defaultValue: Bool) -> Bool {
+        guard let value = CFPreferencesCopyAppValue(key as CFString, domain) else {
+            return defaultValue
+        }
+
+        if let number = value as? NSNumber {
+            return number.boolValue
+        }
+
+        if let string = value as? String {
+            let normalizedString = string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return ["1", "true", "yes"].contains(normalizedString)
+        }
+
+        return defaultValue
+    }
+
+    private static func doubleValue(forKey key: String, defaultValue: Double) -> Double {
+        guard let value = CFPreferencesCopyAppValue(key as CFString, domain) else {
+            return defaultValue
+        }
+
+        if let number = value as? NSNumber {
+            return number.doubleValue
+        }
+
+        if let string = value as? String, let doubleValue = Double(string) {
+            return doubleValue
+        }
+
+        return defaultValue
+    }
+
+    private static func set(_ value: Bool, forKey key: String) throws {
+        CFPreferencesSetAppValue(key as CFString, NSNumber(value: value), domain)
+        try synchronize(key: key)
+    }
+
+    private static func set(_ value: Double, forKey key: String) throws {
+        CFPreferencesSetAppValue(key as CFString, NSNumber(value: value), domain)
+        try synchronize(key: key)
+    }
+
+    private static func synchronize(key: String) throws {
+        guard CFPreferencesAppSynchronize(domain) else {
+            throw DockPreferencesError.writeFailed(key)
+        }
+    }
+
+    private static func runCommand(executablePath: String, arguments: [String]) throws {
+        let process = Process()
+        let outputPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let detail = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let command = ([executablePath] + arguments).joined(separator: " ")
+            throw DockPreferencesError.commandFailed(command: command, detail: detail)
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var displays: [ManagedDisplaySnapshot] = []
@@ -9,6 +127,10 @@ final class AppModel: ObservableObject {
     @Published var accessibilityState: AccessibilityPermissionState = .checking
     @Published var launchAtLoginEnabled = false
     @Published var launchAtLoginStatusMessage = ""
+    @Published var dockSpaceSwitchAnimationDisabled = false
+    @Published var dockAutohideDelay = 0.0
+    @Published var dockAutohideTimeModifier = 0.4
+    @Published var dockControlsStatusMessage = ""
     @Published var preventEdgeOvershoot: Bool {
         didSet {
             UserDefaults.standard.set(preventEdgeOvershoot, forKey: Self.preventEdgeOvershootDefaultsKey)
@@ -32,6 +154,7 @@ final class AppModel: ObservableObject {
 
     init() {
         preventEdgeOvershoot = Self.loadPreventEdgeOvershootPreference()
+        loadDockPreferences()
         refreshLaunchAtLoginState()
         configureWorkspaceObservers()
         beginAccessibilityFlow()
@@ -39,6 +162,10 @@ final class AppModel: ObservableObject {
 
     private init(previewMode: Bool) {
         preventEdgeOvershoot = true
+        dockSpaceSwitchAnimationDisabled = true
+        dockAutohideDelay = 0
+        dockAutohideTimeModifier = 0.4
+        dockControlsStatusMessage = "Preview Dock controls"
         launchAtLoginStatusMessage = "Preview data"
         if previewMode {
             accessibilityState = .authorized
@@ -64,6 +191,36 @@ final class AppModel: ObservableObject {
 
     func refreshSnapshot() {
         refreshSnapshot(announceStatus: true)
+    }
+
+    func reloadDockPreferences() {
+        loadDockPreferences()
+        dockControlsStatusMessage = "Dock preferences reloaded."
+    }
+
+    func applyDockPreferencesAndRestart() {
+        let preferences = DockPreferences(
+            spaceSwitchAnimationDisabled: dockSpaceSwitchAnimationDisabled,
+            autohideDelay: dockAutohideDelay,
+            autohideTimeModifier: dockAutohideTimeModifier
+        )
+
+        do {
+            try DockPreferencesStore.save(preferences)
+            try DockPreferencesStore.restartDock()
+            dockControlsStatusMessage = "Dock preferences applied and Dock restarted."
+        } catch {
+            dockControlsStatusMessage = "Dock update failed: \(error.localizedDescription)"
+        }
+    }
+
+    func restartDock() {
+        do {
+            try DockPreferencesStore.restartDock()
+            dockControlsStatusMessage = "Dock restarted."
+        } catch {
+            dockControlsStatusMessage = "Dock restart failed: \(error.localizedDescription)"
+        }
     }
 
     private func refreshSnapshot(announceStatus: Bool) {
@@ -270,6 +427,14 @@ final class AppModel: ObservableObject {
         }
 
         return UserDefaults.standard.bool(forKey: preventEdgeOvershootDefaultsKey)
+    }
+
+    private func loadDockPreferences() {
+        let preferences = DockPreferencesStore.load()
+        dockSpaceSwitchAnimationDisabled = preferences.spaceSwitchAnimationDisabled
+        dockAutohideDelay = preferences.autohideDelay
+        dockAutohideTimeModifier = preferences.autohideTimeModifier
+        dockControlsStatusMessage = "Dock preferences loaded."
     }
 
     private func applyLaunchAtLoginState(_ state: LaunchAtLoginState) {

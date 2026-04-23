@@ -9,6 +9,7 @@ MacBackroom is a macOS menu bar app for fast Space switching and a small set of 
 - Switch to the left or right Space from the menu bar popup
 - Trigger switching with global shortcuts: `⌃⌥⌘←` and `⌃⌥⌘→`
 - Block repeated overshoot input near the Space boundary
+- Adjust Dock Space animation, autohide delay, and autohide animation speed, then restart Dock to apply changes
 - Show the current managed Space snapshot and refresh it manually
 
 ## Download

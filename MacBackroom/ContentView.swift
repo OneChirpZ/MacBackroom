@@ -85,6 +85,56 @@ struct ContentView: View {
             }
             .disabled(!appModel.canSwitchSpaces)
 
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Dock Controls")
+                    .font(.subheadline.weight(.medium))
+
+                Toggle("Disable Space switch animation", isOn: $appModel.dockSpaceSwitchAnimationDisabled)
+                    .font(.caption)
+
+                dockTimingRow(
+                    title: "Autohide delay",
+                    value: $appModel.dockAutohideDelay,
+                    range: 0...2,
+                    step: 0.05
+                )
+
+                dockTimingRow(
+                    title: "Autohide animation duration",
+                    value: $appModel.dockAutohideTimeModifier,
+                    range: 0...2,
+                    step: 0.05
+                )
+
+                HStack(spacing: 10) {
+                    Button {
+                        appModel.applyDockPreferencesAndRestart()
+                    } label: {
+                        Label("Apply", systemImage: "checkmark.circle")
+                    }
+
+                    Button {
+                        appModel.restartDock()
+                    } label: {
+                        Label("Restart Dock", systemImage: "arrow.clockwise")
+                    }
+
+                    Button {
+                        appModel.reloadDockPreferences()
+                    } label: {
+                        Label("Reload", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                }
+                .controlSize(.small)
+
+                Text(appModel.dockControlsStatusMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if appModel.displays.isEmpty {
                 Text("No managed displays detected yet.")
                     .font(.caption)
@@ -115,9 +165,34 @@ struct ContentView: View {
             .keyboardShortcut("q")
         }
         .padding()
-        .frame(width: 360)
+        .frame(width: 440)
         .onAppear {
             appModel.refreshLaunchAtLoginState()
+        }
+    }
+
+    @ViewBuilder
+    private func dockTimingRow(
+        title: String,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        step: Double
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.caption)
+                Spacer(minLength: 8)
+                Text("\(value.wrappedValue, specifier: "%.2f")s")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                Slider(value: value, in: range, step: step)
+                Stepper(title, value: value, in: range, step: step)
+                    .labelsHidden()
+            }
         }
     }
 }
