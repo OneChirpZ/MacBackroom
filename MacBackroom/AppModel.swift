@@ -32,13 +32,14 @@ final class AppModel: ObservableObject {
     @Published private var shortcutBindings: [AppShortcutAction: HotKeyCenter.Shortcut]
 
     private static let preventEdgeOvershootDefaultsKey = "preventEdgeOvershoot"
+    private static let wakeRecoveryRetryDelays: [TimeInterval] = [1, 2, 4, 8, 8]
 
     private let launchAtLoginManager = LaunchAtLoginManager()
     private var hotKeyCenter: HotKeyCenter?
     private var spaceSwitcher: SpaceSwitcher?
     private var permissionPollTimer: Timer?
     private var workspaceObservers: Set<AnyCancellable> = []
-    private var servicesConfigured = false
+    private var wakeRecoveryToken: UUID?
     private var awaitingWakeRecoveryVerification = false
     private var pendingWakeVerification: SpaceSwitchResult?
     private var hasTriggeredWakeRecovery = false
@@ -63,7 +64,6 @@ final class AppModel: ObservableObject {
         if previewMode {
             accessibilityState = .authorized
             statusMessage = "Preview data"
-            servicesConfigured = true
         } else {
             refreshLaunchAtLoginState()
             beginAccessibilityFlow()
@@ -325,24 +325,48 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func configureServicesIfNeeded() {
-        guard !servicesConfigured else { return }
-
+    @discardableResult
+    private func configureServicesIfNeeded(
+        successMessage: String = "Hotkeys ready.",
+        driverFailurePrefix: String = "Startup failed"
+    ) -> Bool {
         do {
-            let switcher = SpaceSwitcher()
-            let hotKeys = try HotKeyCenter()
-
-            spaceSwitcher = switcher
-            hotKeyCenter = hotKeys
-            try applyHotKeys(shortcutBindings)
-            servicesConfigured = true
-            statusMessage = "Hotkeys ready."
-            refreshSnapshot()
+            if hotKeyCenter == nil {
+                hotKeyCenter = try HotKeyCenter()
+            }
         } catch {
             hotKeyCenter = nil
             spaceSwitcher = nil
-            servicesConfigured = false
             statusMessage = "Startup failed: \(error.localizedDescription)"
+            return false
+        }
+
+        do {
+            if spaceSwitcher == nil {
+                spaceSwitcher = try SpaceSwitcher()
+            }
+        } catch {
+            spaceSwitcher = nil
+            displays = []
+            do {
+                try applyHotKeys(shortcutBindings)
+                statusMessage = "\(driverFailurePrefix): \(error.localizedDescription). Date paste shortcuts remain available."
+            } catch {
+                hotKeyCenter = nil
+                statusMessage = "Startup failed: \(error.localizedDescription)"
+            }
+            return false
+        }
+
+        do {
+            try applyHotKeys(shortcutBindings)
+            statusMessage = successMessage
+            refreshSnapshot()
+            return true
+        } catch {
+            hotKeyCenter = nil
+            statusMessage = "Startup failed: \(error.localizedDescription)"
+            return false
         }
     }
 
@@ -351,7 +375,11 @@ final class AppModel: ObservableObject {
             return
         }
 
-        let registrations = AppShortcutAction.allCases.map { action in
+        let registrations = AppShortcutAction.allCases.compactMap { action -> HotKeyCenter.Registration? in
+            guard shouldRegisterHotKey(for: action) else {
+                return nil
+            }
+
             return HotKeyCenter.Registration(shortcut: bindings[action] ?? action.defaultShortcut) { [weak self] in
                 Task { @MainActor [weak self] in
                     self?.handleShortcutAction(action)
@@ -360,6 +388,15 @@ final class AppModel: ObservableObject {
         }
 
         try hotKeyCenter.replaceAll(with: registrations)
+    }
+
+    private func shouldRegisterHotKey(for action: AppShortcutAction) -> Bool {
+        switch action {
+        case .switchLeft, .switchRight:
+            return spaceSwitcher != nil
+        case .pasteTicketDate, .pasteCompactDate:
+            return true
+        }
     }
 
     private func suspendHotKeys() {
@@ -643,6 +680,7 @@ final class AppModel: ObservableObject {
     }
 
     private func handleWillSleep() {
+        wakeRecoveryToken = nil
         pendingWakeVerification = nil
         awaitingWakeRecoveryVerification = false
         hasTriggeredWakeRecovery = false
@@ -650,11 +688,13 @@ final class AppModel: ObservableObject {
     }
 
     private func handleDidWake() {
+        wakeRecoveryToken = nil
         awaitingWakeRecoveryVerification = true
         pendingWakeVerification = nil
         hasTriggeredWakeRecovery = false
 
         guard AccessibilityPermission.isTrusted(prompt: false) else {
+            prepareForWakeRecovery(message: "Accessibility needs to be rechecked after wake.")
             accessibilityState = .waitingForGrant
             statusMessage = "Accessibility needs to be rechecked after wake."
             startPermissionPolling()
@@ -662,7 +702,7 @@ final class AppModel: ObservableObject {
         }
 
         accessibilityState = .authorized
-        rebuildServicesAfterWake()
+        startWakeRecovery(message: "Mac woke from sleep. Reinitializing hotkeys and gesture driver…")
     }
 
     private func handleActiveSpaceDidChange() {
@@ -675,13 +715,76 @@ final class AppModel: ObservableObject {
         refreshSnapshot(announceStatus: false)
     }
 
-    private func rebuildServicesAfterWake() {
+    private func startWakeRecovery(message: String) {
+        let token = UUID()
+        wakeRecoveryToken = token
+        prepareForWakeRecovery(message: message)
+        scheduleWakeRecoveryAttempt(token: token, attempt: 0)
+    }
+
+    private func prepareForWakeRecovery(message: String) {
         spaceSwitcher?.prepareForSleep()
-        hotKeyCenter = nil
         spaceSwitcher = nil
-        servicesConfigured = false
-        statusMessage = "Mac woke from sleep. Reinitializing hotkeys and gesture driver…"
-        configureServicesIfNeeded()
+        displays = []
+        statusMessage = message
+
+        do {
+            try applyHotKeys(shortcutBindings)
+        } catch {
+            hotKeyCenter = nil
+            statusMessage = "Wake recovery paused: \(error.localizedDescription)"
+        }
+    }
+
+    private func scheduleWakeRecoveryAttempt(token: UUID, attempt: Int) {
+        guard attempt < Self.wakeRecoveryRetryDelays.count else {
+            finishWakeRecoveryAfterExhaustion(token: token)
+            return
+        }
+
+        let delay = Self.wakeRecoveryRetryDelays[attempt]
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.runWakeRecoveryAttempt(token: token, attempt: attempt)
+            }
+        }
+    }
+
+    private func runWakeRecoveryAttempt(token: UUID, attempt: Int) {
+        guard wakeRecoveryToken == token else {
+            return
+        }
+
+        let recovered = configureServicesIfNeeded(
+            successMessage: "Hotkeys ready after wake.",
+            driverFailurePrefix: "Gesture driver unavailable after wake"
+        )
+
+        guard recovered else {
+            let nextAttempt = attempt + 1
+            guard nextAttempt < Self.wakeRecoveryRetryDelays.count else {
+                finishWakeRecoveryAfterExhaustion(token: token)
+                return
+            }
+
+            let nextDelay = Self.wakeRecoveryRetryDelays[nextAttempt]
+            statusMessage = "Gesture driver unavailable after wake. Retrying in \(Int(nextDelay))s…"
+            scheduleWakeRecoveryAttempt(token: token, attempt: nextAttempt)
+            return
+        }
+
+        wakeRecoveryToken = nil
+        hasTriggeredWakeRecovery = false
+    }
+
+    private func finishWakeRecoveryAfterExhaustion(token: UUID) {
+        guard wakeRecoveryToken == token else {
+            return
+        }
+
+        wakeRecoveryToken = nil
+        awaitingWakeRecoveryVerification = false
+        statusMessage = "Gesture driver unavailable after wake. Date paste shortcuts remain available."
     }
 
     private func verifyWakeRecoveryIfNeeded(expectedResult: SpaceSwitchResult) {
@@ -713,10 +816,7 @@ final class AppModel: ObservableObject {
         }
 
         hasTriggeredWakeRecovery = true
-        statusMessage = "Space switching did not recover after wake. Relaunching MacBackroom to rebuild the gesture path…"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            AccessibilityPermission.relaunchCurrentApp()
-        }
+        startWakeRecovery(message: "Space switching did not recover after wake. Rebuilding the gesture driver…")
     }
 }
 

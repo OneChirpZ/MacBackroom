@@ -138,8 +138,12 @@ final class SpaceSwitcher {
         }
     }
 
-    private let skyLight = try! SkyLightBridge()
+    private let skyLight: SkyLightBridge
     private var overshootGuardState: OvershootGuardState?
+
+    init() throws {
+        skyLight = try SkyLightBridge()
+    }
 
     func snapshotDisplays() throws -> [ManagedDisplaySnapshot] {
         try skyLight.copyManagedDisplaySnapshots()
@@ -365,12 +369,17 @@ private final class SkyLightBridge {
         guard let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/SkyLight", RTLD_NOW) else {
             throw Error.failedToOpenFramework
         }
+        var shouldCloseHandle = true
+        defer {
+            if shouldCloseHandle {
+                dlclose(handle)
+            }
+        }
 
-        self.handle = handle
-        mainConnectionIDFn = try Self.load("SLSMainConnectionID", from: handle, as: MainConnectionIDFn.self)
-        copyManagedDisplaySpacesFn = try Self.load("SLSCopyManagedDisplaySpaces", from: handle, as: CopyManagedDisplaySpacesFn.self)
-        copyBestManagedDisplayForPointFn = try Self.load("SLSCopyBestManagedDisplayForPoint", from: handle, as: CopyBestManagedDisplayForPointFn.self)
-        getCurrentCursorLocationFn = try Self.load("SLSGetCurrentCursorLocation", from: handle, as: GetCurrentCursorLocationFn.self)
+        let mainConnectionIDFn = try Self.load("SLSMainConnectionID", from: handle, as: MainConnectionIDFn.self)
+        let copyManagedDisplaySpacesFn = try Self.load("SLSCopyManagedDisplaySpaces", from: handle, as: CopyManagedDisplaySpacesFn.self)
+        let copyBestManagedDisplayForPointFn = try Self.load("SLSCopyBestManagedDisplayForPoint", from: handle, as: CopyBestManagedDisplayForPointFn.self)
+        let getCurrentCursorLocationFn = try Self.load("SLSGetCurrentCursorLocation", from: handle, as: GetCurrentCursorLocationFn.self)
 
         var displayLinkRef: CVDisplayLink?
         let status = CVDisplayLinkCreateWithActiveCGDisplays(&displayLinkRef)
@@ -378,12 +387,18 @@ private final class SkyLightBridge {
             throw Error.displayLinkUnavailable
         }
 
+        self.handle = handle
+        self.mainConnectionIDFn = mainConnectionIDFn
+        self.copyManagedDisplaySpacesFn = copyManagedDisplaySpacesFn
+        self.copyBestManagedDisplayForPointFn = copyBestManagedDisplayForPointFn
+        self.getCurrentCursorLocationFn = getCurrentCursorLocationFn
         displayLink = displayLinkRef
-        CVDisplayLinkSetOutputCallback(
+        _ = CVDisplayLinkSetOutputCallback(
             displayLinkRef,
             Self.displayLinkCallback,
             Unmanaged.passUnretained(self).toOpaque()
         )
+        shouldCloseHandle = false
     }
 
     deinit {
